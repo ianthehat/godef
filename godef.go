@@ -13,6 +13,7 @@ import (
 	"log"
 	"os"
 	"runtime"
+	debugpkg "runtime/debug"
 	"runtime/pprof"
 	"runtime/trace"
 	"sort"
@@ -43,6 +44,7 @@ func fail(s string, a ...interface{}) {
 }
 
 func main() {
+	debugpkg.SetGCPercent(1600)
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: godef [flags] [expr]\n")
 		flag.PrintDefaults()
@@ -51,6 +53,9 @@ func main() {
 	if flag.NArg() > 1 {
 		flag.Usage()
 		os.Exit(2)
+	}
+	if flag.NArg() > 0 {
+		fail("Expressions not yet supported `%v`", flag.Arg(0))
 	}
 	//TODO: types.Debug = *debug
 
@@ -102,30 +107,31 @@ func main() {
 
 	var afile *acmeFile
 	var src []byte
+
 	if *acmeFlag {
 		var err error
 		if afile, err = acmeCurrentFile(); err != nil {
 			fail("%v", err)
 		}
 		filename, src, searchpos = afile.name, afile.body, afile.offset
-	} else if *readStdin {
-		src, _ = ioutil.ReadAll(os.Stdin)
-	} else {
+	} else if filename == "" {
 		// TODO if there's no filename, look in the current
 		// directory and do something plausible.
-		b, err := ioutil.ReadFile(filename)
-		if err != nil {
-			fail("cannot read %s: %v", filename, err)
-		}
-		src = b
+		fail("A filename must be specified")
+	} else if *readStdin {
+		src, _ = ioutil.ReadAll(os.Stdin)
 	}
-
+	if searchpos < 0 {
+		fmt.Fprintf(os.Stderr, "no expression or offset specified\n")
+		flag.Usage()
+		os.Exit(2)
+	}
+	parser, result := parseFile(filename, src, searchpos)
 	// Load, parse, and type-check the packages named on the command line.
 	cfg := &packages.Config{
 		Mode:      packages.LoadSyntax,
-		Error:     func(error) {},
 		Tests:     strings.HasSuffix(filename, "_test.go"),
-		ParseFile: replaceFile(&filename, src),
+		ParseFile: parser,
 	}
 	lpkgs, err := packages.Load(cfg, "contains:"+filename)
 	if err != nil {
@@ -134,23 +140,15 @@ func main() {
 	if len(lpkgs) < 1 {
 		fail("There must be at least one package that contains the file")
 	}
-
+	// get the node
 	var o ast.Node
-	switch {
-	case flag.NArg() > 0:
-		fail("Expressions not yet supported `%v`", flag.Arg(0))
-
-	case searchpos >= 0:
-		// get the node under the cursor
-		o, err = findNode(lpkgs[0], filename, searchpos)
-		if err != nil {
-			fail("%v", err)
-		}
-
+	select {
+	case o = <-result:
 	default:
-		fmt.Fprintf(os.Stderr, "no expression or offset specified\n")
-		flag.Usage()
-		os.Exit(2)
+		fail("no node found at search pos")
+	}
+	if o == nil {
+		fail("Specified offset was not a valid location")
 	}
 	// print old source location to facilitate backtracking
 	if *acmeFlag {
@@ -158,6 +156,7 @@ func main() {
 	}
 	ident, ok := o.(*ast.Ident)
 	if !ok {
+		return // DO NOT SUBMIT
 		fail("no identifier found")
 	}
 	obj := lpkgs[0].TypesInfo.ObjectOf(ident)
@@ -177,68 +176,65 @@ func main() {
 	})
 }
 
-// replaceFile returns a function that can be used as a Parser in packages.Config.
-// It replaces the contents of the filename file with the supplied body.
+// parseFile returns a function that can be used as a Parser in packages.Config.
+// It replaces the contents of a file that matches filename with the src.
+// It also drops all function bodies that do not contain the searchpos.
 // It also modifies the filename to be the canonical form that will appear in the fileset.
-func replaceFile(filename *string, body []byte) func(*token.FileSet, string) (*ast.File, error) {
-	fstat, fstatErr := os.Stat(*filename)
+func parseFile(filename string, src []byte, searchpos int) (func(*token.FileSet, string) (*ast.File, error), chan ast.Node) {
+	fstat, fstatErr := os.Stat(filename)
+	result := make(chan ast.Node, 1)
 	return func(fset *token.FileSet, fname string) (*ast.File, error) {
 		var filedata []byte
 		isInputFile := false
-		if *filename == fname {
+		if filename == fname {
 			isInputFile = true
 		} else if fstatErr != nil {
 			isInputFile = false
 		} else if s, err := os.Stat(fname); err == nil {
 			isInputFile = os.SameFile(fstat, s)
 		}
-		if isInputFile {
-			filedata = body
-			*filename = fname
+		if isInputFile && src != nil {
+			filedata = src
 		} else {
 			var err error
 			if filedata, err = ioutil.ReadFile(fname); err != nil {
 				fail("cannot read %s: %v", fname, err)
 			}
 		}
-		return parser.ParseFile(fset, fname, filedata, 0)
-	}
-}
-
-func findNode(pkg *packages.Package, filename string, searchpos int) (ast.Node, error) {
-	// Find the named file among those in the loaded program.
-	var file *token.File
-	pkg.Fset.Iterate(func(f *token.File) bool {
-		if filename == f.Name() {
-			file = f
-			return false // done
+		file, err := parser.ParseFile(fset, fname, filedata, 0)
+		if file == nil {
+			return nil, err
 		}
-		return true // continue
-	})
-	if file == nil {
-		return nil, fmt.Errorf("File %v not found", filename)
-	}
-
-	// Find offset within the file
-	var pos token.Pos
-	if 0 > searchpos || searchpos > file.Size() {
-		return nil, fmt.Errorf("offset %d is beyond end of file (%d)", searchpos, file.Size())
-	}
-	pos = file.Pos(searchpos)
-
-	// Find the syntax node for that offset
-	for _, f := range pkg.Syntax {
-		posn := pkg.Fset.Position(f.Pos())
-		if posn.Filename != filename {
-			continue
+		var keepFunc *ast.FuncDecl
+		if isInputFile {
+			pos := file.Pos() + token.Pos(searchpos)
+			if pos > file.End() {
+				return file, fmt.Errorf("cursor %d is beyond end of file %s (%d)", searchpos, fname, file.End()-file.Pos())
+			}
+			path, _ := astutil.PathEnclosingInterval(file, pos, pos)
+			if len(path) < 1 {
+				return nil, fmt.Errorf("Offest was not a valid token")
+			}
+			// report the base node we matched
+			result <- path[0]
+			// if we are inside a function, we need to retain that function body
+			// start from the top not the bottom
+			for i := len(path) - 1; i >= 0; i-- {
+				if f, ok := path[i].(*ast.FuncDecl); ok {
+					keepFunc = f
+					break
+				}
+			}
 		}
-		path, _ := astutil.PathEnclosingInterval(f, pos, pos)
-		if len(path) < 1 {
-			return nil, fmt.Errorf("Offest was not a valid token")
+		// and drop all function bodies that are not relevant so they don't get
+		// type checked
+		for _, decl := range file.Decls {
+			if f, ok := decl.(*ast.FuncDecl); ok && f != keepFunc {
+				f.Body = nil
+			}
 		}
-		return path[0], nil
-	}
-	return nil, fmt.Errorf("file %v not found", filename)
+		return file, err
+	}, result
 }
 
 type orderedObjects []types.Object
