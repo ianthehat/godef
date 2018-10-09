@@ -13,7 +13,7 @@ import (
 	"log"
 	"os"
 	"runtime"
-	debugpkg "runtime/debug"
+	"runtime/debug"
 	"runtime/pprof"
 	"runtime/trace"
 	"sort"
@@ -24,19 +24,21 @@ import (
 	"golang.org/x/tools/go/types/typeutil"
 )
 
-var readStdin = flag.Bool("i", false, "read file from stdin")
-var offset = flag.Int("o", -1, "file offset of identifier in stdin")
-var debug = flag.Bool("debug", false, "debug mode")
-var tflag = flag.Bool("t", false, "print type information")
-var aflag = flag.Bool("a", false, "print public type and member information")
-var Aflag = flag.Bool("A", false, "print all type and members information")
-var fflag = flag.String("f", "", "Go source filename")
-var acmeFlag = flag.Bool("acme", false, "use current acme window")
-var jsonFlag = flag.Bool("json", false, "output location in JSON format (-t flag is ignored)")
+var (
+	readStdin    = flag.Bool("i", false, "read file from stdin")
+	offset       = flag.Int("o", -1, "file offset of identifier in stdin")
+	debugEnabled = flag.Bool("debug", false, "debug mode")
+	tflag        = flag.Bool("t", false, "print type information")
+	aflag        = flag.Bool("a", false, "print public type and member information")
+	printAllFlag = flag.Bool("A", false, "print all type and members information")
+	fflag        = flag.String("f", "", "Go source filename")
+	acmeFlag     = flag.Bool("acme", false, "use current acme window")
+	jsonFlag     = flag.Bool("json", false, "output location in JSON format (-t flag is ignored)")
 
-var cpuprofile = flag.String("cpuprofile", "", "write CPU profile to this file")
-var memprofile = flag.String("memprofile", "", "write memory profile to this file")
-var traceFlag = flag.String("trace", "", "write trace log to this file")
+	cpuprofile = flag.String("cpuprofile", "", "write CPU profile to this file")
+	memprofile = flag.String("memprofile", "", "write memory profile to this file")
+	traceFlag  = flag.String("trace", "", "write trace log to this file")
+)
 
 func fail(s string, a ...interface{}) {
 	fmt.Fprint(os.Stderr, "godef: "+fmt.Sprintf(s, a...)+"\n")
@@ -44,7 +46,7 @@ func fail(s string, a ...interface{}) {
 }
 
 func main() {
-	debugpkg.SetGCPercent(1600)
+	debug.SetGCPercent(1600)
 	flag.Usage = func() {
 		fmt.Fprintf(os.Stderr, "usage: godef [flags] [expr]\n")
 		flag.PrintDefaults()
@@ -101,7 +103,7 @@ func main() {
 		}()
 	}
 
-	*tflag = *tflag || *aflag || *Aflag
+	*tflag = *tflag || *aflag || *printAllFlag
 	searchpos := *offset
 	filename := *fflag
 
@@ -157,7 +159,6 @@ func main() {
 	ident, ok := o.(*ast.Ident)
 	if !ok {
 		return // DO NOT SUBMIT
-		fail("no identifier found")
 	}
 	obj := lpkgs[0].TypesInfo.ObjectOf(ident)
 	if obj == nil {
@@ -205,15 +206,21 @@ func parseFile(filename string, src []byte, searchpos int) (func(*token.FileSet,
 		if file == nil {
 			return nil, err
 		}
+
 		var keepFunc *ast.FuncDecl
 		if isInputFile {
-			pos := file.Pos() + token.Pos(searchpos)
-			if pos > file.End() {
-				return file, fmt.Errorf("cursor %d is beyond end of file %s (%d)", searchpos, fname, file.End()-file.Pos())
+			tfile := fset.File(file.Pos())
+			if tfile == nil {
+				return nil, fmt.Errorf("invalid file position")
 			}
+			if searchpos > tfile.Size() {
+				return file, fmt.Errorf("cursor %d is beyond end of file %s (%d)", searchpos, fname, tfile.Size())
+			}
+
+			pos := tfile.Pos(searchpos)
 			path, _ := astutil.PathEnclosingInterval(file, pos, pos)
 			if len(path) < 1 {
-				return nil, fmt.Errorf("Offest was not a valid token")
+				return nil, fmt.Errorf("offset was not a valid token")
 			}
 			// report the base node we matched
 			result <- path[0]
@@ -261,19 +268,18 @@ func done(fSet *token.FileSet, obj types.Object, q types.Qualifier) {
 		}
 		fmt.Printf("%s\n", jsonStr)
 		return
-	} else {
-		fmt.Printf("%v\n", posToString(pos))
 	}
+	fmt.Printf("%v\n", posToString(pos))
 	if !*tflag {
 		return
 	}
 	fmt.Printf("%s\n", typeStr(obj, q))
-	if *aflag || *Aflag {
+	if *aflag || *printAllFlag {
 		m := orderedObjects(members(obj))
 		sort.Sort(m)
 		for _, obj := range m {
 			// Ignore unexported members unless Aflag is set.
-			if !*Aflag && !ast.IsExported(obj.Name()) {
+			if !*printAllFlag && !ast.IsExported(obj.Name()) {
 				continue
 			}
 			fmt.Printf("\t%s\n", strings.Replace(typeStr(obj, q), "\n", "\n\t\t", -1))
