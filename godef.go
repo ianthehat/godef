@@ -180,10 +180,10 @@ func main() {
 // It replaces the contents of a file that matches filename with the src.
 // It also drops all function bodies that do not contain the searchpos.
 // It also modifies the filename to be the canonical form that will appear in the fileset.
-func parseFile(filename string, src []byte, searchpos int) (func(*token.FileSet, string) (*ast.File, error), chan ast.Node) {
+func parseFile(filename string, src []byte, searchpos int) (func(*token.FileSet, string, []byte) (*ast.File, error), chan ast.Node) {
 	fstat, fstatErr := os.Stat(filename)
 	result := make(chan ast.Node, 1)
-	return func(fset *token.FileSet, fname string) (*ast.File, error) {
+	return func(fset *token.FileSet, fname string, _ []byte) (*ast.File, error) {
 		var filedata []byte
 		isInputFile := false
 		if filename == fname {
