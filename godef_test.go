@@ -1,16 +1,13 @@
 package main
 
 import (
-	"go/build"
 	"go/token"
 	"io/ioutil"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
+	"go/types"
 
-	"github.com/rogpeppe/godef/go/ast"
-	"github.com/rogpeppe/godef/go/types"
 	"golang.org/x/tools/go/packages/packagestest"
 )
 
@@ -31,31 +28,19 @@ func benchGoDef(b *testing.B, exporter packagestest.Exporter) {
 }
 
 func runGoDefTest(t testing.TB, exporter packagestest.Exporter, runCount int, modules []packagestest.Module) {
+	const expectedGodefCount = 16
 	exported := packagestest.Export(t, exporter, modules)
 	defer exported.Cleanup()
-
 	posStr := func(p token.Position) string {
 		return localPos(p, exported, modules)
 	}
-
-	const gopathPrefix = "GOPATH="
-	const gorootPrefix = "GOROOT="
-	for _, v := range exported.Config.Env {
-		if strings.HasPrefix(v, gopathPrefix) {
-			build.Default.GOPATH = v[len(gopathPrefix):]
-		}
-		if strings.HasPrefix(v, gorootPrefix) {
-			build.Default.GOROOT = v[len(gorootPrefix):]
-		}
-	}
-
 	count := 0
-	exported.Expect(map[string]interface{}{
+	if err := exported.Expect(map[string]interface{}{
 		"godef": func(src, target token.Position) {
 			count++
 			input, err := ioutil.ReadFile(src.Filename)
 			if err != nil {
-				t.Errorf("Failed %v: %v", src, err)
+				t.Fatalf("cannot read source: %v", err)
 				return
 			}
 			// There's a "saved" version of the file, so
@@ -76,29 +61,25 @@ func runGoDefTest(t testing.TB, exporter packagestest.Exporter, runCount int, mo
 				}
 				defer ioutil.WriteFile(src.Filename, input, 0666)
 			}
-			// repeat the actual godef part n times, for benchmark support
-			var obj *ast.Object
+			var obj types.Object
+			var fSet *token.FileSet
 			for i := 0; i < runCount; i++ {
-				obj, _, err = godef(src.Filename, input, src.Offset)
+				fSet, obj, err = godef(exported.Config, src.Filename, input, src.Offset)
 				if err != nil {
-					t.Errorf("Failed %v: %v", src, err)
+					t.Errorf("godef error %v: %v", posStr(src), err)
 					return
 				}
 			}
-			pos := types.FileSet.Position(types.DeclPos(obj))
-			check := token.Position{
-				Filename: pos.Filename,
-				Line:     pos.Line,
-				Column:   pos.Column,
-				Offset:   pos.Offset,
-			}
-			if posStr(check) != posStr(target) {
-				t.Errorf("Got %v expected %v", posStr(check), posStr(target))
+			pos := objToPos(fSet, obj)
+			if pos.String() != target.String() {
+				t.Errorf("unexpected result %v -> %v want %v", posStr(src), posStr(pos), posStr(target))
 			}
 		},
-	})
-	if count == 0 {
-		t.Fatalf("No godef tests were run")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if count != expectedGodefCount {
+		t.Fatalf("expected %d godef tests, got %d", expectedGodefCount, count)
 	}
 }
 

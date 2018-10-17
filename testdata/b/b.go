@@ -3,8 +3,9 @@ package b
 import "github.com/rogpeppe/godef/a"
 
 type S1 struct { //@S1
-	F1 int //@mark(S1F1, "F1")
-	S2     //@godef("S2", S2), mark(S1S2, "S2")
+	F1  int //@mark(S1F1, "F1")
+	S2      //@godef("S2", S2), mark(S1S2, "S2")
+	a.A     //@godef("A", A)
 }
 
 type S2 struct { //@S2
