@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 
+	"golang.org/x/tools/go/packages"
 	"github.com/rogpeppe/godef/go/ast"
 	"github.com/rogpeppe/godef/go/parser"
 	"github.com/rogpeppe/godef/go/printer"
@@ -127,8 +128,12 @@ func run(ctx context.Context) error {
 		}
 		src = b
 	}
-
-	obj, typ, err := godef(filename, src, searchpos)
+	// Load, parse, and type-check the packages named on the command line.
+	cfg := &packages.Config{
+		Context: ctx,
+		Tests:   strings.HasSuffix(filename, "_test.go"),
+	}
+	obj, typ, err := adaptGodef(cfg, filename, src, searchpos)
 	if err != nil {
 		return err
 	}

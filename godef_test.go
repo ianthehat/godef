@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	"golang.org/x/tools/go/packages"
 	"github.com/rogpeppe/godef/go/ast"
 	"github.com/rogpeppe/godef/go/types"
 	"golang.org/x/tools/go/packages/packagestest"
@@ -56,7 +57,7 @@ func runGoDefTest(t testing.TB, exporter packagestest.Exporter, runCount int, mo
 	if err := exported.Expect(map[string]interface{}{
 		"godef": func(src, target token.Position) {
 			count++
-			obj, _, err := invokeGodef(src, runCount)
+			obj, _, err := invokeGodef(exported.Config, src, runCount)
 			if err != nil {
 				t.Error(err)
 				return
@@ -74,7 +75,7 @@ func runGoDefTest(t testing.TB, exporter packagestest.Exporter, runCount int, mo
 		},
 		"godefPrint": func(src token.Position, mode string, re *regexp.Regexp) {
 			count++
-			obj, typ, err := invokeGodef(src, runCount)
+			obj, typ, err := invokeGodef(exported.Config, src, runCount)
 			if err != nil {
 				t.Error(err)
 				return
@@ -120,7 +121,7 @@ func runGoDefTest(t testing.TB, exporter packagestest.Exporter, runCount int, mo
 
 var cwd, _ = os.Getwd()
 
-func invokeGodef(src token.Position, runCount int) (*ast.Object, types.Type, error) {
+func invokeGodef(cfg *packages.Config, src token.Position, runCount int) (*ast.Object, types.Type, error) {
 	input, err := ioutil.ReadFile(src.Filename)
 	if err != nil {
 		return nil, types.Type{}, fmt.Errorf("Failed %v: %v", src, err)
@@ -147,7 +148,7 @@ func invokeGodef(src token.Position, runCount int) (*ast.Object, types.Type, err
 	var obj *ast.Object
 	var typ types.Type
 	for i := 0; i < runCount; i++ {
-		obj, typ, err = godef(src.Filename, input, src.Offset)
+		obj, typ, err = adaptGodef(cfg, src.Filename, input, src.Offset)
 		if err != nil {
 			return nil, types.Type{}, fmt.Errorf("Failed %v: %v", src, err)
 		}
