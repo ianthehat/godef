@@ -7,7 +7,6 @@ package main
 import (
 	"bufio"
 	"bytes"
-	"flag"
 	"fmt"
 	"os"
 	"os/exec"
@@ -24,12 +23,6 @@ import (
 	gotypes "go/types"
 	"golang.org/x/tools/go/packages"
 )
-
-var forcePackages triBool
-
-func init() {
-	flag.Var(&forcePackages, "new-implementation", "force godef to use the new go/packages implentation")
-}
 
 // triBool is used as a unset, on or off valued flag
 type triBool int
@@ -100,9 +93,9 @@ func detectModuleMode(cfg *packages.Config) bool {
 	return false
 }
 
-func adaptGodef(cfg *packages.Config, filename string, src []byte, searchpos int) (*Object, error) {
+func (app *Application) godef(cfg *packages.Config, filename string, src []byte, searchpos int) (*Object, error) {
 	usePackages := false
-	switch forcePackages {
+	switch app.ForcePackages {
 	case unset:
 		usePackages = detectModuleMode(cfg)
 	case on:
@@ -117,7 +110,7 @@ func adaptGodef(cfg *packages.Config, filename string, src []byte, searchpos int
 		}
 		return adaptGoObject(fset, obj)
 	}
-	obj, typ, err := godef(filename, src, searchpos)
+	obj, typ, err := app.oldGodef(filename, src, searchpos)
 	if err != nil {
 		return nil, err
 	}

@@ -27,7 +27,8 @@ func testGoDef(t *testing.T, exporter packagestest.Exporter) {
 	if err := exported.Expect(map[string]interface{}{
 		"godef": func(src, target token.Position) {
 			godefCount++
-			obj, err := invokeGodef(exported, src)
+			app := &Application{}
+			obj, err := app.invokeGodef(exported, src)
 			if err != nil {
 				t.Error(err)
 				return
@@ -43,38 +44,27 @@ func testGoDef(t *testing.T, exporter packagestest.Exporter) {
 		},
 		"godefPrint": func(src token.Position, mode string, re *regexp.Regexp) {
 			godefPrintCount++
-			obj, err := invokeGodef(exported, src)
+			app := &Application{}
+			switch mode {
+			case "json":
+				app.JSON = true
+			case "all":
+				app.All = true
+			case "public":
+				app.Members = true
+			case "type":
+				app.Type = true
+			default:
+				t.Fatalf("Invalid print mode %v", mode)
+			}
+			app.prepare()
+			obj, err := app.invokeGodef(exported, src)
 			if err != nil {
 				t.Error(err)
 				return
 			}
 			buf := &bytes.Buffer{}
-			switch mode {
-			case "json":
-				*jsonFlag = true
-				*tflag = false
-				*aflag = false
-				*Aflag = false
-			case "all":
-				*jsonFlag = false
-				*tflag = true
-				*aflag = true
-				*Aflag = true
-			case "public":
-				*jsonFlag = false
-				*tflag = true
-				*aflag = true
-				*Aflag = false
-			case "type":
-				*jsonFlag = false
-				*tflag = true
-				*aflag = false
-				*Aflag = false
-			default:
-				t.Fatalf("Invalid print mode %v", mode)
-			}
-
-			print(buf, obj)
+			app.print(buf, obj)
 			if !re.Match(buf.Bytes()) {
 				t.Errorf("in mode %q got %v want %v", mode, buf, re)
 			}
@@ -98,7 +88,9 @@ func benchGoDef(b *testing.B, exporter packagestest.Exporter) {
 	defer exported.Cleanup()
 
 	for _, forced := range []triBool{unset, off, on} {
-		forcePackages = forced
+		app := &Application{
+			ForcePackages: forced,
+		}
 		b.Run(forced.String(), func(b *testing.B) {
 			for i := 0; i < b.N; i++ {
 				var godefBenchCount int
@@ -108,7 +100,7 @@ func benchGoDef(b *testing.B, exporter packagestest.Exporter) {
 							return
 						}
 						godefBenchCount++
-						invokeGodef(exported, src)
+						app.invokeGodef(exported, src)
 					},
 				}); err != nil {
 					b.Fatal(err)
@@ -136,8 +128,8 @@ func godefExport(t testing.TB, exporter packagestest.Exporter) *packagestest.Exp
 	}
 	// do the export
 	exported := packagestest.Export(t, exporter, []packagestest.Module{{
-		Name:  "github.com/rogpeppe/godef",
-		Files: files,
+		Name:    "github.com/rogpeppe/godef",
+		Files:   files,
 		Overlay: overlay,
 	}})
 	// process the resulting configuration
@@ -156,12 +148,12 @@ func godefExport(t testing.TB, exporter packagestest.Exporter) *packagestest.Exp
 
 var cwd, _ = os.Getwd()
 
-func invokeGodef(e *packagestest.Exported, src token.Position) (*Object, error) {
+func (app *Application) invokeGodef(e *packagestest.Exported, src token.Position) (*Object, error) {
 	input, err := e.FileContents(src.Filename)
 	if err != nil {
 		return nil, fmt.Errorf("Failed %v: %v", src, err)
 	}
-	obj, err := adaptGodef(e.Config, src.Filename, input, src.Offset)
+	obj, err := app.godef(e.Config, src.Filename, input, src.Offset)
 	if err != nil {
 		return nil, fmt.Errorf("Failed %v: %v", src, err)
 	}

@@ -10,13 +10,10 @@ import (
 	"go/build"
 	"io"
 	"io/ioutil"
-	"log"
 	"os"
 	"path/filepath"
 	"runtime"
 	debugpkg "runtime/debug"
-	"runtime/pprof"
-	"runtime/trace"
 	"strconv"
 	"strings"
 
@@ -24,31 +21,63 @@ import (
 	"github.com/rogpeppe/godef/go/parser"
 	"github.com/rogpeppe/godef/go/token"
 	"github.com/rogpeppe/godef/go/types"
+	"github.com/rogpeppe/godef/tool"
 	"golang.org/x/tools/go/packages"
 )
 
-var readStdin = flag.Bool("i", false, "read file from stdin")
-var offset = flag.Int("o", -1, "file offset of identifier in stdin")
-var debug = flag.Bool("debug", false, "debug mode")
-var tflag = flag.Bool("t", false, "print type information")
-var aflag = flag.Bool("a", false, "print public type and member information")
-var Aflag = flag.Bool("A", false, "print all type and members information")
-var fflag = flag.String("f", "", "Go source filename")
-var acmeFlag = flag.Bool("acme", false, "use current acme window")
-var jsonFlag = flag.Bool("json", false, "output location in JSON format (-t flag is ignored)")
-
-var cpuprofile = flag.String("cpuprofile", "", "write CPU profile to this file")
-var memprofile = flag.String("memprofile", "", "write memory profile to this file")
-var traceFlag = flag.String("trace", "", "write trace log to this file")
-
 func main() {
-	if err := run(context.Background()); err != nil {
-		fmt.Fprintf(os.Stderr, "godef: %v\n", err)
-		os.Exit(2)
-	}
+	tool.Main(context.Background(), &Application{}, os.Args[1:])
 }
 
-func run(ctx context.Context) error {
+type Application struct {
+	// Add the basic profiling flags
+	tool.Profile
+	// All the command line flags
+	ReadStdin     bool    `flag:"i" help:"read file from stdin"`
+	Offset        int     `flag:"o" help:"file offset of identifier in stdin"`
+	Debug         bool    `flag:"debug" help:"debug mode"`
+	Type          bool    `flag:"t" help:"print type information"`
+	Members       bool    `flag:"a" help:"print public type and member information"`
+	All           bool    `flag:"A" help:"print all type and members information"`
+	Filename      string  `flag:"f" help:"source filename"`
+	Acme          bool    `flag:"acme" help:"use current acme window"`
+	JSON          bool    `flag:"json" help:"output location in JSON format (-t flag is ignored)"`
+	ForcePackages triBool `flag:"new-implementation" help:"force godef to use the new go/packages implentation"`
+
+	expr string // The zeroth command line argument if present
+}
+
+// Name implements tool.Application returning the binary name.
+func (app *Application) Name() string { return "godef" }
+
+// Usage implements tool.Application returning empty extra argument usage.
+func (app *Application) Usage() string { return "[expr]" }
+
+// ShortHelp implements tool.Application returning the main binary help.
+func (app *Application) ShortHelp() string {
+	return "Go to definition for identifiers or package paths."
+}
+
+// DetailedHelp implements tool.Application returning the main binary help.
+// This includes the short help for all the sub commands.
+func (app *Application) DetailedHelp(f *flag.FlagSet) {
+	f.PrintDefaults()
+}
+
+func (app *Application) prepare() {
+	app.Members = app.Members || app.All
+	app.Type = app.Type || app.Members
+}
+
+func (app *Application) Run(ctx context.Context, args ...string) error {
+	// store the expression so that oldGoDef can pick them up again
+	if len(args) > 0 {
+		app.expr = args[0]
+		//TODO: what if more args were passed?
+	}
+
+	app.prepare()
+
 	// for most godef invocations we want to produce the result and quit without
 	// ever triggering the GC, but we don't want to outright disable it for the
 	// rare case when we are asked to handle a truly huge data set, so we set it
@@ -56,69 +85,20 @@ func run(ctx context.Context) error {
 	// than needed to prevent GC on a common very large build, but is essentially
 	// a magic number not a calculated one
 	debugpkg.SetGCPercent(1600)
-	flag.Usage = func() {
-		fmt.Fprintf(os.Stderr, "usage: godef [flags] [expr]\n")
-		flag.PrintDefaults()
-	}
-	flag.Parse()
-	if flag.NArg() > 1 {
-		flag.Usage()
-		os.Exit(2)
-	}
 
-	if *cpuprofile != "" {
-		f, err := os.Create(*cpuprofile)
-		if err != nil {
-			return err
-		}
-		if err := pprof.StartCPUProfile(f); err != nil {
-			return err
-		}
-		defer pprof.StopCPUProfile()
-	}
-
-	if *traceFlag != "" {
-		f, err := os.Create(*traceFlag)
-		if err != nil {
-			return err
-		}
-		if err := trace.Start(f); err != nil {
-			return err
-		}
-		defer func() {
-			trace.Stop()
-			log.Printf("To view the trace, run:\n$ go tool trace view %s", *traceFlag)
-		}()
-	}
-
-	if *memprofile != "" {
-		f, err := os.Create(*memprofile)
-		if err != nil {
-			return err
-		}
-		defer func() {
-			runtime.GC() // get up-to-date statistics
-			if err := pprof.WriteHeapProfile(f); err != nil {
-				log.Printf("Writing memory profile: %v", err)
-			}
-			f.Close()
-		}()
-	}
-
-	types.Debug = *debug
-	*tflag = *tflag || *aflag || *Aflag
-	searchpos := *offset
-	filename := *fflag
+	types.Debug = app.Debug
+	searchpos := app.Offset
+	filename := app.Filename
 
 	var afile *acmeFile
 	var src []byte
-	if *acmeFlag {
+	if app.Acme {
 		var err error
 		if afile, err = acmeCurrentFile(); err != nil {
 			return fmt.Errorf("%v", err)
 		}
 		filename, src, searchpos = afile.name, afile.body, afile.offset
-	} else if *readStdin {
+	} else if app.ReadStdin {
 		src, _ = ioutil.ReadAll(os.Stdin)
 	} else {
 		// TODO if there's no filename, look in the current
@@ -134,20 +114,20 @@ func run(ctx context.Context) error {
 		Context: ctx,
 		Tests:   strings.HasSuffix(filename, "_test.go"),
 	}
-	obj, err := adaptGodef(cfg, filename, src, searchpos)
+	obj, err := app.godef(cfg, filename, src, searchpos)
 	if err != nil {
 		return err
 	}
 
 	// print old source location to facilitate backtracking
-	if *acmeFlag {
+	if app.Acme {
 		fmt.Printf("\t%s:#%d\n", afile.name, afile.runeOffset)
 	}
 
-	return print(os.Stdout, obj)
+	return app.print(os.Stdout, obj)
 }
 
-func godef(filename string, src []byte, searchpos int) (*ast.Object, types.Type, error) {
+func (app *Application) oldGodef(filename string, src []byte, searchpos int) (*ast.Object, types.Type, error) {
 	pkgScope := ast.NewScope(parser.Universe)
 	f, err := parser.ParseFile(types.FileSet, filename, src, 0, pkgScope, types.DefaultImportPathToName)
 	if f == nil {
@@ -156,8 +136,8 @@ func godef(filename string, src []byte, searchpos int) (*ast.Object, types.Type,
 
 	var o ast.Node
 	switch {
-	case flag.NArg() > 0:
-		o, err = parseExpr(f.Scope, flag.Arg(0))
+	case app.expr != "":
+		o, err = parseExpr(f.Scope, app.expr)
 		if err != nil {
 			return nil, types.Type{}, err
 		}
@@ -183,7 +163,7 @@ func godef(filename string, src []byte, searchpos int) (*ast.Object, types.Type,
 		}
 		return &ast.Object{Kind: ast.Pkg, Data: pkg.Dir}, types.Type{}, nil
 	case ast.Expr:
-		if !*tflag {
+		if !app.Type {
 			// try local declarations only
 			if obj, typ := types.ExprType(e, types.DefaultImporter, types.FileSet); obj != nil {
 				return obj, typ, nil
@@ -191,13 +171,13 @@ func godef(filename string, src []byte, searchpos int) (*ast.Object, types.Type,
 		}
 		// add declarations from other files in the local package and try again
 		pkg, err := parseLocalPackage(filename, f, pkgScope, types.DefaultImportPathToName)
-		if pkg == nil && !*tflag {
+		if pkg == nil && !app.Type {
 			fmt.Printf("parseLocalPackage error: %v\n", err)
 		}
-		if flag.NArg() > 0 {
+		if app.expr != "" {
 			// Reading declarations in other files might have
 			// resolved the original expression.
-			e, err = parseExpr(f.Scope, flag.Arg(0))
+			e, err = parseExpr(f.Scope, app.expr)
 			if err != nil {
 				return nil, types.Type{}, err
 			}
@@ -329,12 +309,12 @@ func (o orderedObjects) Less(i, j int) bool { return o[i].Name < o[j].Name }
 func (o orderedObjects) Len() int           { return len(o) }
 func (o orderedObjects) Swap(i, j int)      { o[i], o[j] = o[j], o[i] }
 
-func print(out io.Writer, obj *Object) error {
+func (app *Application) print(out io.Writer, obj *Object) error {
 	if obj.Kind == PathKind {
 		fmt.Fprintf(out, "%s\n", obj.Value)
 		return nil
 	}
-	if *jsonFlag {
+	if app.JSON {
 		jsonStr, err := json.Marshal(obj.Position)
 		if err != nil {
 			return fmt.Errorf("JSON marshal error: %v", err)
@@ -344,14 +324,14 @@ func print(out io.Writer, obj *Object) error {
 	} else {
 		fmt.Fprintf(out, "%v\n", obj.Position)
 	}
-	if obj.Kind == BadKind || !*tflag {
+	if obj.Kind == BadKind || !app.Type {
 		return nil
 	}
 	fmt.Fprintf(out, "%s\n", typeStr(obj))
-	if *aflag || *Aflag {
+	if app.Members {
 		for _, obj := range obj.Members {
-			// Ignore unexported members unless Aflag is set.
-			if !*Aflag && (obj.Pkg != "" || !ast.IsExported(obj.Name)) {
+			// Ignore unexported members unless app.A is set.
+			if !app.All && (obj.Pkg != "" || !ast.IsExported(obj.Name)) {
 				continue
 			}
 			fmt.Fprintf(out, "\t%s\n", strings.Replace(typeStr(obj), "\n", "\n\t\t", -1))
